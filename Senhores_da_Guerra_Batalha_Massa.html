@@ -51,13 +51,267 @@ const RUN = 1.7; // corrida na aproximação final (carga)
 const frameIndex = (t, k, d, p) => ((t * 8 + k) * 5 + d) * 6 + p;
 const ARROW_FRAME = 480;
 
+// ---------- animação de caminhada (spritesheets de 8 quadros × 5 direções desenhadas; as outras 3 por espelhamento) ----------
+// Os sprites originais só têm a pose parada e os golpes. Na carga, cada sprite parado vira um "boneco":
+// as pernas são recortadas (canela + pé, de baixo da túnica até o chão) e articuladas com quadril, joelho
+// e tornozelo (IK de 2 ossos). Cada quadro é desenhado uma única vez numa página de atlas própria; no jogo,
+// cada soldado só escolhe o índice do quadro (nada é processado por soldado na GPU além do sprite normal).
+// Spritesheets desenhados à mão podem substituir os quadros gerados: veja SDG_WALK_SHEETS / __G.importWalkSheet.
+const WALK_FRAMES = 8;
+// projeção na tela do eixo "para frente" do soldado, por direção desenhada: front, side, back, fd, bd
+const WALK_PF = [[0, .5], [1, 0], [0, -.5], [.76, .3], [.76, -.3]];
+const WALK_ARM = [.028, .03, .02, .04, .03, .02, .015, 0]; // contra-rotação dos ombros (braços + arma/escudo) por tipo
+const WALK = { ready: false, base: 0, page: null, pages: [], tex: [], invCycle: new Float32Array(KINDS.length).fill(1 / 13), imports: [], stats: null };
+const walkFrameIndex = (t, k, d, f) => WALK.base + (((t * 8 + k) * 5 + d) << 3) + f;
+
+function walkRig(src, m, k, d) {
+  const W0 = m.w, H0 = m.h, ax = m.ax, ay = m.ay, cav = k === CAVALRY;
+  const px = src.getImageData(m.x, m.y, W0, H0).data;
+  const al = (x, y) => px[(y * W0 + x) * 4 + 3];
+  const TH = 96, band = cav ? 40 : 24, maxW = cav ? 12 : 14, minW = cav ? 2.6 : 3.6;
+  const X0 = Math.max(0, Math.floor(ax - band)), X1 = Math.min(W0 - 1, Math.ceil(ax + band));
+  const yTop = Math.max(0, Math.floor(ay - (cav ? 72 : 46))), startZone = ay - (cav ? 12 : 6);
+  // 1) rastreia cada perna a partir do chão, subindo linha a linha até sumir sob a túnica / caparazão
+  const legs = []; let active = [];
+  for (let y = H0 - 1; y >= yTop; y--) {
+    const runs = []; let a = -1;
+    for (let x = X0; x <= X1 + 1; x++) { const on = x <= X1 && al(x, y) > TH; if (on && a < 0) a = x; else if (!on && a >= 0) { runs.push([a, x - 1]); a = -1; } }
+    const claim = runs.map(() => []);
+    for (const L of active) {
+      const p = L.rows[L.rows.length - 1]; let best = -1, bd = 1e9;
+      for (let ri = 0; ri < runs.length; ri++) { const r = runs[ri]; if (r[1] < p.a - 1 || r[0] > p.b + 1) continue; const dd = Math.abs((r[0] + r[1]) / 2 - L.cx); if (dd < bd) { bd = dd; best = ri; } }
+      if (best < 0) L.done = true; else claim[best].push(L);
+    }
+    for (let ri = 0; ri < runs.length; ri++) {
+      const r = runs[ri], w = r[1] - r[0] + 1, cl = claim[ri];
+      if (cl.length > 1 || (cl.length === 1 && w > maxW)) { for (const L of cl) L.done = true; continue; } // virilha / barra da túnica
+      if (cl.length === 1) { const L = cl[0]; L.rows.push({ y, a: r[0], b: r[1] }); L.cx = L.cx * .6 + (r[0] + r[1]) / 2 * .4; }
+      else if (y >= startZone && w <= maxW && w >= 2) { const L = { rows: [{ y, a: r[0], b: r[1] }], cx: (r[0] + r[1]) / 2, done: false }; legs.push(L); active.push(L); }
+    }
+    active = active.filter(L => !L.done);
+  }
+  // 2) valida (descarta cabos de lança, pontas de escudo, pixels soltos) e ajusta uma linha central
+  let good = [];
+  for (const L of legs) {
+    const R = L.rows, n = R.length; if (n < 7) continue;
+    let sy = 0, sc = 0, syy = 0, syc = 0; const ws = [];
+    for (const r of R) { const c = (r.a + r.b) / 2, yy = r.y - R[0].y; sy += yy; sc += c; syy += yy * yy; syc += yy * c; ws.push(r.b - r.a + 1); }
+    const den = n * syy - sy * sy, s = den ? (n * syc - sy * sc) / den : 0, c0 = (sc - s * sy) / n;
+    ws.sort((p, q) => p - q); const wm = ws[n >> 1];
+    if (wm < minW || Math.abs(s) > 1.1) continue;
+    Object.assign(L, { bot: R[0].y, top: R[n - 1].y, s, c0, wm, score: n * wm });
+    good.push(L);
+  }
+  good.sort((p, q) => q.score - p.score); good = good.slice(0, cav ? 4 : 2);
+  good.sort((p, q) => p.c0 - q.c0);
+  // cabos de lança / mastros encostados nas pernas: linhas finas que continuam acima da túnica → ficam no corpo
+  const shafts = [];
+  if (good.length) {
+    const top = Math.min(...good.map(L => L.top)), pts = [];
+    for (let y = Math.max(0, top - 14); y < top; y++) {
+      let a = -1;
+      for (let x = X0; x <= X1 + 1; x++) { const on = x <= X1 && al(x, y) > TH; if (on && a < 0) a = x; else if (!on && a >= 0) { if (x - a <= 4 && a > 0 && x < W0) pts.push({ x: (a + x - 1) / 2, y, w: x - a }); a = -1; } }
+    }
+    const used = new Set();
+    for (const p0 of pts) { if (used.has(p0)) continue; const g = pts.filter(q => !used.has(q) && Math.abs(q.x - p0.x) < 3.5); if (g.length < 8) continue;
+      g.forEach(q => used.add(q)); let n = g.length, sy = 0, sx = 0, syy = 0, syx = 0, sw = 0; for (const q of g) { sy += q.y; sx += q.x; syy += q.y * q.y; syx += q.y * q.x; sw += q.w; }
+      const den = n * syy - sy * sy, sl = den ? (n * syx - sy * sx) / den : 0; shafts.push({ sl, c: (sx - sl * sy) / n, hw: sw / n / 2 + .8 }); }
+  }
+  const isShaft = (x, y) => { for (const S of shafts) if (Math.abs(x - (S.c + S.sl * y)) <= S.hw) return true; return false; };
+  // 3) separa as peças: corpo (sem as pernas), canela e pé de cada perna
+  const body = new Uint8ClampedArray(px);
+  const pf = WALK_PF[d], pfl = Math.hypot(pf[0], pf[1]), pfx = pf[0] / pfl, pfy = pf[1] / pfl;
+  const out = [];
+  for (const L of good) {
+    const cAt = y => L.c0 + L.s * (y - L.bot), vl = L.bot - L.top + 1;
+    const footH = Math.max(2, Math.round(vl * (cav ? .2 : .24))), ya = L.bot - footH;
+    const shin = new Uint8ClampedArray(W0 * H0 * 4), foot = new Uint8ClampedArray(W0 * H0 * 4);
+    const half = L.wm / 2 + 1.5;
+    const rowOf = new Map(L.rows.map(r => [r.y, r]));
+    for (let y = L.top; y <= Math.min(H0 - 1, L.bot + 1); y++) {
+      const r = rowOf.get(y) || rowOf.get(L.bot); const c = cAt(y);
+      let x0 = Math.max(r.a - 1, Math.floor(c - half)), x1 = Math.min(r.b + 1, Math.ceil(c + half));
+      if (y > ya) { x0 = r.a - 1; x1 = r.b + 1; } // o pé pode ser mais largo que a canela
+      x0 = Math.max(0, x0); x1 = Math.min(W0 - 1, x1);
+      for (let x = x0; x <= x1; x++) {
+        const o = (y * W0 + x) * 4; if (!px[o + 3] || isShaft(x, y)) continue;
+        const dst = y >= ya ? foot : shin;
+        dst[o] = px[o]; dst[o + 1] = px[o + 1]; dst[o + 2] = px[o + 2]; dst[o + 3] = px[o + 3];
+        if (y === ya) { shin[o] = px[o]; shin[o + 1] = px[o + 1]; shin[o + 2] = px[o + 2]; shin[o + 3] = px[o + 3]; }
+        body[o + 3] = 0;
+      }
+    }
+    // a canela continua alguns pixels para cima (fica escondida pela túnica; aparece quando o joelho avança)
+    for (let e = 1; e <= 4; e++) { const y = L.top - e; if (y < 0) break; const c = cAt(L.top), x0 = Math.max(0, Math.floor(c - L.wm / 2)), x1 = Math.min(W0 - 1, Math.ceil(c + L.wm / 2));
+      for (let x = x0; x <= x1; x++) { const o = (y * W0 + x) * 4, oi = (L.top * W0 + x) * 4; if (!px[oi + 3]) continue; shin[o] = px[oi]; shin[o + 1] = px[oi + 1]; shin[o + 2] = px[oi + 2]; shin[o + 3] = px[oi + 3]; } }
+    const Kn = { x: cAt(L.top - 2), y: L.top - 2 }, An = { x: cAt(ya), y: ya }, Sole = { x: cAt(L.bot), y: L.bot + .5 };
+    const b = Math.hypot(An.x - Kn.x, An.y - Kn.y), a = b * (cav ? 1.5 : 1.08); // coxa escondida sob a túnica / caparazão
+    out.push({ shin: toCanvas(shin, W0, H0), foot: toCanvas(foot, W0, H0), K: Kn, An, Sole, a, b, footZ: footH, x: L.c0 });
+  }
+  // 4) parâmetros do passo
+  const n = out.length;
+  if (n) { // mesmas medidas para todas as pernas (na vista de frente a perspectiva alonga a perna mais próxima)
+    const am = out.reduce((q, l) => q + l.a, 0) / n, bm = out.reduce((q, l) => q + l.b, 0) / n, fm = out.reduce((q, l) => q + l.footZ, 0) / n;
+    for (const l of out) { l.a = am; l.b = bm; l.footZ = fm; }
+  }
+  const rig = { W: W0, H: H0, ax, ay, k, d, cav, legs: out, pf, A: 0, beta: cav ? .64 : .58, lift: 0, L: 0 };
+  if (!n) { rig.body = [{ cv: toCanvas(body, W0, H0), y0: 0 }]; return rig; }
+  const Lm = out.reduce((s, l) => s + l.a + l.b, 0) / n, sx = out.reduce((s, l) => s + l.Sole.x, 0) / n, sy = out.reduce((s, l) => s + l.Sole.y, 0) / n;
+  rig.L = Lm; rig.A = Lm * (cav ? .42 : .4); rig.lift = Lm * (cav ? .2 : .17);
+  for (const l of out) { // ponto neutro no chão: mantém só o afastamento lateral de cada pé (a profundidade vira passo)
+    const vx = l.Sole.x - sx, vy = l.Sole.y - sy, along = vx * pfx + vy * pfy;
+    l.G = { x: sx + vx - along * pfx, y: sy + vy - along * pfy };
+    l.lat = (vx - along * pfx) * (pf[1] === 0 ? 0 : 1);
+  }
+  // fases: humanos alternam (0 / ½); cavalos andam em 4 tempos (posterior, anterior, posterior, anterior)
+  if (cav && n >= 3 && Math.abs(pf[0]) > .5) { out.forEach((l, i) => { l.ph = [0, .5, .25, .75][i]; l.sg = i < 2 ? -1 : 1; }); }
+  else out.forEach((l, i) => { l.ph = i % 2 ? .5 : 0; if (cav && n > 2) l.ph += i >= 2 ? .25 : 0; l.sg = 1; });
+  // corpo: parte de baixo (túnica, ou o cavalo) e parte de cima (tronco, braços, arma e escudo) — gira em torno da cintura
+  const top = Math.min(...good.map(L => L.top));
+  rig.waist = cav ? -1 : Math.max(2, Math.round(top - Lm * .46));
+  rig.pivot = { x: ax, y: cav ? ay - Lm * 1.6 : rig.waist };
+  if (cav) rig.body = [{ cv: toCanvas(body, W0, H0), up: false }];
+  else {
+    const low = new Uint8ClampedArray(body), up = new Uint8ClampedArray(body);
+    low.fill(0, 0, rig.waist * W0 * 4); up.fill(0, (rig.waist + 2) * W0 * 4);
+    rig.body = [{ cv: toCanvas(low, W0, H0), up: false }, { cv: toCanvas(up, W0, H0), up: true }];
+  }
+  rig.lat0 = Math.sign(out[0].lat || -1);
+  let s = 0; for (let f = 0; f < WALK_FRAMES; f++) s += walkHip(rig, f / WALK_FRAMES); rig.hipRef = s / WALK_FRAMES;
+  return rig;
+}
+function toCanvas(data, w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d', { willReadFrequently: true }).putImageData(new ImageData(data, w, h), 0, 0); return c; }
+// trajetória do tornozelo de uma perna (relativa ao quadril, no plano do passo): apoio = pé parado no chão
+function walkFoot(rig, l, p) {
+  const ph = (p + l.ph) % 1, A = rig.A, be = rig.beta;
+  if (ph < be) return { u: A * (1 - 2 * ph / be), h: 0, fa: 0, st: 1 };
+  const s = (ph - be) / (1 - be);
+  return { u: -A * Math.cos(Math.PI * s), h: rig.lift * Math.sin(Math.PI * Math.pow(s, .8)), fa: .55 * Math.sin(Math.PI * s) * (.55 - s), st: 0 };
+}
+// altura do quadril: a perna de apoio fica quase esticada (pêndulo invertido) → o corpo sobe e desce a cada passo
+function walkHip(rig, p) {
+  let z = 1e9;
+  for (const l of rig.legs) { const f = walkFoot(rig, l, p), L = (l.a + l.b) * .995; if (f.st) z = Math.min(z, l.footZ + Math.sqrt(Math.max(0, L * L - f.u * f.u))); }
+  const zmax = rig.legs.reduce((m, l) => Math.max(m, l.footZ + (l.a + l.b) * .955), 0);
+  return Math.min(z, zmax);
+}
+function drawWalkFrame(rig, p, ctx, ox, oy) {
+  const pf = rig.pf, hz = walkHip(rig, p), bob = hz - rig.hipRef, side = Math.abs(pf[0]), frontal = 1 - side;
+  const sw = Math.sin(2 * Math.PI * p);
+  const sx = rig.cav ? 0 : sw * rig.L * .035 * rig.lat0 * frontal; // peso passa de um pé para o outro
+  const set = (a, b, c, d, e, f) => ctx.setTransform(a, b, c, d, e + ox, f + oy);
+  // pernas (atrás do corpo), ordenadas pela profundidade na tela
+  const poses = rig.legs.map(l => {
+    const ft = walkFoot(rig, l, p), hipZ = hz, tz = l.footZ + ft.h, df = ft.u, dz = tz - hipZ;
+    let dist = Math.hypot(df, dz); const a = l.a, b = l.b; dist = Math.min(a + b - .01, Math.max(Math.abs(a - b) + .01, dist));
+    const th = Math.atan2(dz, df), al = Math.acos(Math.max(-1, Math.min(1, (a * a + dist * dist - b * b) / (2 * a * dist))));
+    const kf = a * Math.cos(th + l.sg * al), kz = hipZ + a * Math.sin(th + l.sg * al);
+    const af = dist * Math.cos(th), az = hipZ + dist * Math.sin(th);
+    const S = (f, z) => ({ x: l.G.x + f * pf[0] + sx * .4, y: l.G.y + f * pf[1] - z });
+    return { l, K: S(kf, kz), An: S(af, az), fa: ft.fa * side * (rig.cav ? .4 : 1), depth: l.G.y + df * pf[1] };
+  });
+  poses.sort((p, q) => p.depth - q.depth);
+  for (const P of poses) {
+    const l = P.l, ex = l.An.x - l.K.x, ey = l.An.y - l.K.y, lr = Math.hypot(ex, ey) || 1, nx = P.An.x - P.K.x, ny = P.An.y - P.K.y, ln = Math.hypot(nx, ny) || 1;
+    const er = [ex / lr, ey / lr], en = [nx / ln, ny / ln], s = ln / lr;
+    // M = s·en·erᵀ + nn·nrᵀ  (gira e encurta a canela no eixo do osso, sem alterar a largura)
+    const nr = [-er[1], er[0]], nn = [-en[1], en[0]];
+    const m00 = s * en[0] * er[0] + nn[0] * nr[0], m01 = s * en[0] * er[1] + nn[0] * nr[1], m10 = s * en[1] * er[0] + nn[1] * nr[0], m11 = s * en[1] * er[1] + nn[1] * nr[1];
+    set(m00, m10, m01, m11, P.K.x - (m00 * l.K.x + m01 * l.K.y), P.K.y - (m10 * l.K.x + m11 * l.K.y));
+    ctx.drawImage(l.shin, 0, 0);
+    const c = Math.cos(P.fa), si = Math.sin(P.fa);
+    set(c, si, -si, c, P.An.x - (c * l.An.x - si * l.An.y), P.An.y - (si * l.An.x + c * l.An.y));
+    ctx.drawImage(l.foot, 0, 0);
+  }
+  // corpo
+  const lean = rig.cav ? .018 * Math.sin(4 * Math.PI * p) * side : (.035 + .012 * Math.cos(4 * Math.PI * p)) * side;
+  const roll = rig.cav ? 0 : -WALK_ARM[rig.k] * sw * rig.lat0 * frontal * 1.2;
+  for (const part of rig.body) {
+    const ang = part.up || rig.cav ? lean + roll : 0, c = Math.cos(ang), si = Math.sin(ang), px0 = rig.pivot.x, py0 = rig.pivot.y;
+    set(c, si, -si, c, px0 - (c * px0 - si * py0) + sx, py0 - (si * px0 + c * py0) - bob);
+    ctx.drawImage(part.cv, 0, 0);
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+// gera todos os quadros e empacota em páginas (Uint8Array RGBA) — devolve { frames, pages, invCycle }.
+// É um gerador: cede a vez a cada sprite para a carga ser feita aos poucos, sem travar o jogo (celulares).
+function* bakeWalk(atlasImg, meta, maxTex, imports) {
+  const t0 = performance.now();
+  const ac = document.createElement('canvas'); ac.width = atlasImg.naturalWidth || atlasImg.width; ac.height = atlasImg.naturalHeight || atlasImg.height;
+  const src = ac.getContext('2d', { willReadFrequently: true }); src.drawImage(atlasImg, 0, 0);
+  const byKey = new Map(meta.map(m => [m.k, m]));
+  const scratch = document.createElement('canvas'), sc = scratch.getContext('2d', { willReadFrequently: true });
+  const frames = [], cyc = new Float32Array(KINDS.length), cycN = new Float32Array(KINDS.length), legCount = [];
+  const trimmed = (w, h, ax, ay) => { // corta a área transparente do quadro desenhado no rascunho
+    const d = sc.getImageData(0, 0, w, h).data;
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (d[(y * w + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    if (x1 < 0) { x0 = y0 = 0; x1 = y1 = 0; }
+    const tw = x1 - x0 + 1, th = y1 - y0 + 1, out = new Uint8ClampedArray(tw * th * 4);
+    for (let y = 0; y < th; y++) out.set(d.subarray(((y + y0) * w + x0) * 4, ((y + y0) * w + x1 + 1) * 4), y * tw * 4);
+    return { data: out, w: tw, h: th, ax: ax - x0, ay: ay - y0 };
+  };
+  for (let t = 0; t < 2; t++) for (let k = 0; k < KINDS.length; k++) for (let d = 0; d < DIRS.length; d++) {
+    const key = TEAMS[t] + '|' + KINDS[k] + '|' + DIRS[d], m = byKey.get(key + '|-1'), imp = imports && imports.get(key);
+    if (imp) { // spritesheet importado: usa os quadros como vieram
+      for (let f = 0; f < WALK_FRAMES; f++) { const fr = imp.frames[f % imp.frames.length]; if (scratch.width !== fr.w || scratch.height !== fr.h) { scratch.width = fr.w; scratch.height = fr.h; } sc.putImageData(fr.img, 0, 0); frames.push(trimmed(fr.w, fr.h, imp.ax, imp.ay)); }
+      if (imp.stride && d === 1) { cyc[k] += imp.stride; cycN[k]++; }
+      yield; continue;
+    }
+    const rig = walkRig(src, m, k, d); legCount.push(rig.legs.length);
+    const MX = rig.cav ? 18 : 13, MT = 4, MB = 8, w = rig.W + MX * 2, h = rig.H + MT + MB;
+    for (let f = 0; f < WALK_FRAMES; f++) {
+      if (scratch.width !== w || scratch.height !== h) { scratch.width = w; scratch.height = h; } else sc.clearRect(0, 0, w, h);
+      sc.imageSmoothingEnabled = true;
+      drawWalkFrame(rig, f / WALK_FRAMES, sc, MX, MT);
+      frames.push(trimmed(w, h, rig.ax + MX, rig.ay + MT));
+    }
+    if (d === 1 && rig.legs.length) { cyc[k] += 2 * rig.A / rig.beta / K; cycN[k]++; } // distância percorrida por ciclo (unidades do mundo)
+    yield;
+  }
+  // empacotamento em prateleiras (mais altos primeiro), páginas de 2048 de largura
+  const PW = 2048, PH = Math.min(maxTex || 4096, 4096), PAD = 2, order = frames.map((_, i) => i).sort((a, b) => frames[b].h - frames[a].h);
+  const pages = []; let pg = null;
+  const newPage = () => { pg = { x: PAD, y: PAD, sh: 0, used: 0, items: [] }; pages.push(pg); };
+  newPage();
+  for (const i of order) {
+    const f = frames[i];
+    if (pg.x + f.w + PAD > PW) { pg.y += pg.sh + PAD; pg.x = PAD; pg.sh = 0; }
+    if (pg.y + f.h + PAD > PH) { newPage(); }
+    f.page = pages.length - 1; f.x = pg.x; f.y = pg.y; pg.items.push(i);
+    pg.x += f.w + PAD; pg.sh = Math.max(pg.sh, f.h); pg.used = Math.max(pg.used, pg.y + f.h + PAD);
+  }
+  const outPages = pages.map(p => {
+    const H = Math.ceil(p.used / 4) * 4, buf = new Uint8Array(PW * H * 4);
+    for (const i of p.items) { const f = frames[i]; for (let y = 0; y < f.h; y++) buf.set(f.data.subarray(y * f.w * 4, (y + 1) * f.w * 4), ((f.y + y) * PW + f.x) * 4); f.data = null; }
+    return { w: PW, h: H, buf };
+  });
+  const invCycle = new Float32Array(KINDS.length);
+  for (let k = 0; k < KINDS.length; k++) invCycle[k] = cycN[k] ? cycN[k] / cyc[k] : 1 / 13;
+  return { frames, pages: outPages, invCycle, ms: performance.now() - t0, legCount };
+}
+// spritesheet importado: { team, kind, dir, src (data:/mesma origem), frames=8, cols=frames, fw, fh, ax, ay, stride? }
+function loadWalkImports(list) {
+  return Promise.all((list || []).map(e => new Promise(res => {
+    const im = new Image(); im.onload = () => {
+      const n = e.frames || WALK_FRAMES, cols = e.cols || n, fw = e.fw || Math.floor(im.width / cols), fh = e.fh || Math.floor(im.height / Math.ceil(n / cols));
+      const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(im, 0, 0);
+      const frames = []; for (let f = 0; f < n; f++) frames.push({ img: x.getImageData((f % cols) * fw, Math.floor(f / cols) * fh, fw, fh), w: fw, h: fh });
+      const teams = e.team ? [e.team] : TEAMS, out = [];
+      for (const t of teams) out.push([t + '|' + e.kind + '|' + e.dir, { frames, ax: e.ax ?? fw / 2, ay: e.ay ?? fh - 4, stride: e.stride }]);
+      res(out);
+    }; im.onerror = () => { console.warn('Spritesheet de caminhada não carregou:', e.src); res([]); }; im.src = e.src;
+  }))).then(r => new Map(r.flat()));
+}
+
 // ---------- estado ----------
 const MAX = 30000, MAXC = 12000, MAXA = 6000;
 const S = {
   x: new Float32Array(MAX), y: new Float32Array(MAX), face: new Float32Array(MAX), walk: new Float32Array(MAX),
   team: new Uint8Array(MAX), kind: new Uint8Array(MAX), reg: new Int32Array(MAX), slot: new Int32Array(MAX),
   hp: new Float32Array(MAX), cd: new Float32Array(MAX), atk: new Float32Array(MAX), hit: new Float32Array(MAX),
-  tgt: new Int32Array(MAX), alive: new Uint8Array(MAX), moving: new Uint8Array(MAX), busy: new Uint8Array(MAX), chg: new Float32Array(MAX), ammo: new Uint8Array(MAX),
+  tgt: new Int32Array(MAX), alive: new Uint8Array(MAX), moving: new Uint8Array(MAX), anim: new Uint8Array(MAX), // anim: 1 = quadros de caminhada (andando ou assentando os pés)
+  busy: new Uint8Array(MAX), chg: new Float32Array(MAX), ammo: new Uint8Array(MAX),
 };
 let N = 0;
 let regs = [];
@@ -153,7 +407,7 @@ function makeBattle(total) {
         let k = KIND_ID[kind];
         if (kind !== 'cavaleiro' && kind !== 'arqueiro' && m === Math.floor(r.cols * 1.5)) k = KIND_ID.estandarte; // porta-estandarte no meio da 2ª fileira
         S.team[i] = t; S.kind[i] = k; S.reg[i] = r.id; S.slot[i] = m; S.hp[i] = 100; S.alive[i] = 1; S.tgt[i] = -1;
-        S.cd[i] = Math.random() * 800; S.atk[i] = 0; S.chg[i] = 0; S.ammo[i] = UNIT.arqueiro.ammo; S.hit[i] = 0; S.face[i] = face; S.walk[i] = Math.random() * 6.28;
+        S.cd[i] = Math.random() * 800; S.atk[i] = 0; S.chg[i] = 0; S.ammo[i] = UNIT.arqueiro.ammo; S.hit[i] = 0; S.face[i] = face; S.walk[i] = Math.random(); S.anim[i] = 0; S.moving[i] = 0;
         const p = slotPos(r, m); S.x[i] = p.x; S.y[i] = p.y;
       }
       if (t === 0) r.order = { reg: -1, x: cx, y: cy, face, cols: r.cols, hold: true };
@@ -276,6 +530,7 @@ function step(dt) {
         if (j >= 0 && S.alive[j]) { const dx = S.x[j] - S.x[i], dy = S.y[j] - S.y[i], rr = U_REACH[k] + 8; if (dx * dx + dy * dy <= rr * rr) melee(i, j, k); }
       }
     }
+    if (S.anim[i] && !S.moving[i]) walkSettle(i, dt); // parou: termina o passo e volta à pose parada
     S.busy[i] = 0; S.moving[i] = 0;
     if (r.routing) { moveTo(i, r.gx + (S.slot[i] % 7 - 3) * 12, r.gy, U_SPD[k] * 1.7, dt); if (S.y[i] < -200 || S.y[i] > world.h + 200) { S.alive[i] = 0; } continue; }
     // procura inimigo só se o regimento estiver em contato (escalonado: a cada 6 quadros)
@@ -351,10 +606,26 @@ function turnTo(i, a, dt) { let da = a - S.face[i]; da = Math.atan2(Math.sin(da)
 function moveTo(i, x, y, spd, dt, faceDefault) {
   const dx = x - S.x[i], dy = y - S.y[i], d = Math.hypot(dx, dy);
   // pequenos ajustes de posição: desliza sem animar nem virar (evita o “tremor”)
-  if (d <= 2.2) { if (d > .05) { const mv = Math.min(d, spd * dt * .5); S.x[i] += dx / d * mv; S.y[i] += dy / d * mv; } if (faceDefault !== undefined) turnTo(i, faceDefault, dt); return; }
-  const mv = Math.min(d, spd * dt); S.x[i] += dx / d * mv; S.y[i] += dy / d * mv; S.moving[i] = 1; S.walk[i] += mv * .55;
-  // vira para onde anda só se o trecho for longo; perto do lugar, mantém a frente do regimento
-  if (d > 9 || faceDefault === undefined) turnTo(i, Math.atan2(dy, dx), dt); else turnTo(i, faceDefault, dt);
+  if (d <= 2.2) { if (d > .05) { const mv = Math.min(d, spd * dt * .5); S.x[i] += dx / d * mv; S.y[i] += dy / d * mv; if (S.anim[i]) walkAdvance(i, mv); } if (faceDefault !== undefined) turnTo(i, faceDefault, dt); return; }
+  const mv = Math.min(d, spd * dt); S.x[i] += dx / d * mv; S.y[i] += dy / d * mv; S.moving[i] = 1;
+  if (!S.anim[i]) { // começa a andar: pé de saída e instante do passo um pouco diferentes para cada soldado
+    S.anim[i] = 1; S.walk[i] = (Math.random() < .5 ? 0 : .5) + WALK_REST + Math.random() * .14;
+  }
+  // vira para onde anda se o trecho for longo; perto do lugar, mantém a frente do regimento —
+  // exceto num ajuste para o lado, em que vira para onde anda (a pose sempre corresponde ao deslocamento)
+  const ang = Math.atan2(dy, dx);
+  if (d > 9 || faceDefault === undefined) turnTo(i, ang, dt);
+  else { const c = Math.cos(ang - faceDefault); turnTo(i, c < -.34 || c > .42 ? faceDefault : ang, dt); }
+  // fase do passo proporcional à distância andada (o pé de apoio não desliza); andando de ré o ciclo corre ao contrário
+  walkAdvance(i, Math.cos(ang - S.face[i]) < -.34 ? -mv : mv);
+}
+function walkAdvance(i, dist) { const w = S.walk[i] + dist * WALK.invCycle[S.kind[i]]; S.walk[i] = w - Math.floor(w); }
+const WALK_REST = .04; // fase com os dois pés no chão (apoio duplo), próxima da pose parada
+function walkSettle(i, dt) {
+  const w = S.walk[i], q2 = (w - WALK_REST) * 2, q = q2 - Math.floor(q2);
+  if (q < .05 || q > .95) { S.anim[i] = 0; return; }
+  const st = dt * .0018, nw = q < .5 ? w - Math.min(st, q / 2) : w + Math.min(st, (1 - q) / 2);
+  S.walk[i] = nw - Math.floor(nw);
 }
 function meleeOrChase(i, j, k, dt) {
   const dx = S.x[j] - S.x[i], dy = S.y[j] - S.y[i], d = Math.hypot(dx, dy), reach = U_REACH[k];
@@ -446,7 +717,7 @@ void main(){
 const spriteFS = `#version 300 es
 precision highp float; in vec2 vUV; in float vTint; in vec2 vLoc; in float vStep; in vec4 vRect; uniform sampler2D uTex; uniform vec2 uAtlas; out vec4 o;
 void main(){ vec2 uv=vUV;
- // marcha: na faixa dos pés, metade esquerda e direita sobem alternadamente (passo)
+ // modo antigo (só enquanto os spritesheets de caminhada ainda estão sendo gerados): faixa dos pés sobe alternadamente
  if(vStep!=0. && vLoc.y>.78){ float side=vLoc.x<.5?1.:-1.; float lift=max(0.,vStep*side)*.07*smoothstep(.78,.86,vLoc.y); uv.y+=lift*vRect.w/uAtlas.y; uv.x+=(vLoc.x<.5?.012:-.012)*max(0.,vStep*side)*vRect.z/uAtlas.x; }
  vec4 c=texture(uTex,uv); if(uv.y>(vRect.y+vRect.w)/uAtlas.y) c.a=0.; if(c.a<.45) discard; vec3 col=c.rgb;
  if(vTint>0.) col=mix(col,vec3(.9,.12,.08),min(vTint,1.)*.55);
@@ -484,11 +755,52 @@ function initGL(atlasImg, groundImg, meta) {
   atlasW = atlasImg.naturalWidth; atlasH = atlasImg.naturalHeight;
   texGround = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, texGround); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, groundImg);
   gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
-  const nf = meta.length, fd = new Float32Array(nf * 2 * 4);
-  meta.forEach((m, i) => { fd.set([m.x, m.y, m.w, m.h], i * 4); fd.set([m.ax, m.ay, 0, 0], (nf + i) * 4); });
-  texFrames = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, texFrames); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, nf, 2, 0, gl.RGBA, gl.FLOAT, fd);
+  uploadFrameTable(meta);
+}
+// tabela de quadros (retângulo no atlas + âncora) lida pelo shader com texelFetch; inclui os quadros de caminhada
+function uploadFrameTable(list) {
+  const nf = list.length, fd = new Float32Array(nf * 2 * 4);
+  list.forEach((m, i) => { fd[i * 4] = m.x; fd[i * 4 + 1] = m.y; fd[i * 4 + 2] = m.w; fd[i * 4 + 3] = m.h; fd[(nf + i) * 4] = m.ax; fd[(nf + i) * 4 + 1] = m.ay; fd[(nf + i) * 4 + 2] = m.page || 0; });
+  if (!texFrames) texFrames = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texFrames); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, nf, 2, 0, gl.RGBA, gl.FLOAT, fd);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  FR = meta;
+  FR = list;
+}
+// gera os spritesheets de caminhada aos poucos (fatias de ~8 ms) e envia à GPU quando termina
+let walkBakeId = 0;
+function startWalkBake(atlasImg, meta) {
+  const id = ++walkBakeId;
+  return loadWalkImports(WALK.imports).then(imports => new Promise(done => {
+    const it = bakeWalk(atlasImg, meta, gl.getParameter(gl.MAX_TEXTURE_SIZE), imports);
+    const pump = () => {
+      if (id !== walkBakeId) return done(false);
+      const t = performance.now(); let r;
+      try { do r = it.next(); while (!r.done && performance.now() - t < 10); }
+      catch (e) { console.warn('Caminhada: falha ao gerar quadros, usando o modo antigo', e); return done(false); }
+      if (!r.done) return walkYield(pump);
+      applyWalk(r.value, meta); done(true);
+    };
+    pump();
+  }));
+}
+const walkChan = new MessageChannel(), walkQ = []; walkChan.port1.onmessage = () => walkQ.shift()(); // cede a vez sem o atraso mínimo do setTimeout
+function walkYield(fn) { walkQ.push(fn); walkChan.port2.postMessage(0); }
+function applyWalk(res, meta) {
+  for (const t of WALK.tex) gl.deleteTexture(t);
+  WALK.tex = res.pages.map(p => {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, p.w, p.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, p.buf);
+    gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  });
+  WALK.pages = res.pages.map(p => ({ w: p.w, h: p.h })); // os pixels já estão na GPU; libera a memória
+  WALK.base = meta.length; WALK.page = Uint8Array.from(res.frames, f => f.page);
+  WALK.invCycle.set(res.invCycle);
+  uploadFrameTable(meta.concat(res.frames));
+  WALK.stats = { frames: res.frames.length, pages: WALK.pages.map(p => p.w + '×' + p.h).join(', '), ms: Math.round(res.ms), legs: res.legCount };
+  WALK.ready = true;
+  console.info('Caminhada: ' + res.frames.length + ' quadros em ' + WALK.pages.length + ' página(s) [' + WALK.stats.pages + '], ' + WALK.stats.ms + ' ms');
 }
 function setCam(p) { gl.uniform2f(gl.getUniformLocation(p, 'uCam'), cam.x, cam.y); gl.uniform1f(gl.getUniformLocation(p, 'uScale'), cam.s); gl.uniform1f(gl.getUniformLocation(p, 'uIso'), isoMode ? 1 : 0); gl.uniform2f(gl.getUniformLocation(p, 'uView'), W, H); }
 const ISO_C = Math.SQRT1_2;
@@ -499,20 +811,35 @@ function screenDir(a) { // direção na tela de um ângulo do mundo
 function dirOf(a) { const vx = Math.cos(a), vy = Math.sin(a), t = Math.atan2(vy, Math.abs(vx)); const d = t < -1.18 ? 2 : t < -.39 ? 4 : t < .39 ? 1 : t < 1.18 ? 3 : 0; return [d, vx < 0 && d !== 0 && d !== 2]; }
 function toScreen(x, y) { const dx = x - cam.x, dy = y - cam.y; const s = isoMode ? [ISO_C * (dx - dy), .5 * ISO_C * (dx + dy)] : [dx, dy]; return { x: s[0] * cam.s + W / 2, y: s[1] * cam.s + H / 2 }; }
 function toWorld(sx, sy) { const s = { x: (sx - W / 2) / cam.s, y: (sy - H / 2) / cam.s }; if (!isoMode) return { x: s.x + cam.x, y: s.y + cam.y }; const a = s.x / ISO_C, b = s.y / (.5 * ISO_C); return { x: (a + b) / 2 + cam.x, y: (b - a) / 2 + cam.y }; }
+let DIR_D = 0, DIR_F = 0; // direção desenhada (0 front, 1 side, 2 back, 3 fd, 4 bd) e espelhamento — sem alocar arrays
+function dirFace(a) {
+  let vx = Math.cos(a), vy = Math.sin(a);
+  if (isoMode) { const sx = ISO_C * (vx - vy), sy = .7 * ISO_C * (vx + vy); vx = sx; vy = sy; }
+  const t = Math.atan2(vy, vx < 0 ? -vx : vx);
+  DIR_D = t < -1.18 ? 2 : t < -.39 ? 4 : t < .39 ? 1 : t < 1.18 ? 3 : 0; DIR_F = vx < 0 && DIR_D !== 0 && DIR_D !== 2 ? 1 : 0;
+}
 let instCount = 0, shadowCount = 0;
+const grp = [], grpN = new Int32Array(9), grpOff = new Int32Array(9); // grupo 0 = atlas original; 1.. = páginas de caminhada
 function buildInstances(now) {
   let o = 0;
+  const np = WALK.ready ? WALK.pages.length : 0;
+  for (let g = 0; g <= np; g++) { if (!grp[g]) grp[g] = new Float32Array(MAX * 8); grpN[g] = 0; }
   // margem de visão (culling)
   const tl = toWorld(-120, -160), br = toWorld(W + 120, H + 160), tr = toWorld(W + 120, -160), bl = toWorld(-120, H + 160);
   const minX = Math.min(tl.x, br.x, tr.x, bl.x), maxX = Math.max(tl.x, br.x, tr.x, bl.x), minY = Math.min(tl.y, br.y, tr.y, bl.y), maxY = Math.max(tl.y, br.y, tr.y, bl.y);
   for (let i = 0; i < N; i++) {
     if (!S.alive[i]) continue; const x = S.x[i], y = S.y[i]; if (x < minX || x > maxX || y < minY || y > maxY) continue;
-    const [d, flip] = dirOf(screenDir(S.face[i]));
-    let ph = 0; if (S.atk[i] > 0) { const p = (700 - S.atk[i]) / 700; ph = p < .22 ? 1 : p < .36 ? 2 : p < .48 ? 3 : p < .65 ? 4 : 5; }
-    const f = frameIndex(S.team[i], S.kind[i], d, ph);
-    inst[o++] = x; inst[o++] = y; inst[o++] = f; inst[o++] = (flip ? 1 : 0) + (S.moving[i] ? 2 : 0);
-    inst[o++] = 0; inst[o++] = S.hit[i] > 0 ? S.hit[i] / 180 : 0; inst[o++] = S.walk[i] + ((S.slot[i] + ((S.slot[i] / 7) | 0)) & 1) * 3.14159; inst[o++] = S.kind[i] === 7 ? -1 : 0;
+    dirFace(S.face[i]); const d = DIR_D, t = S.team[i], k = S.kind[i];
+    let f, g = 0, legacy = 0;
+    if (S.atk[i] > 0) { const p = (700 - S.atk[i]) / 700; f = frameIndex(t, k, d, p < .22 ? 1 : p < .36 ? 2 : p < .48 ? 3 : p < .65 ? 4 : 5); } // golpe tem prioridade
+    else if (S.anim[i] && np) { f = walkFrameIndex(t, k, d, (S.walk[i] * WALK_FRAMES) & 7); g = WALK.page[f - WALK.base] + 1; } // quadro do ciclo de caminhada
+    else { f = frameIndex(t, k, d, 0); legacy = !np && S.moving[i] ? 2 : 0; } // parado (ou modo antigo enquanto os quadros são gerados)
+    const a = grp[g]; let q = grpN[g]++ * 8;
+    a[q++] = x; a[q++] = y; a[q++] = f; a[q++] = DIR_F + legacy;
+    a[q++] = 0; a[q++] = S.hit[i] > 0 ? S.hit[i] / 180 : 0; a[q++] = S.walk[i] * 6.2832 + ((S.slot[i] + ((S.slot[i] / 7) | 0)) & 1) * 3.14159; a[q++] = k === 7 ? -1 : 0;
   }
+  for (let g = 1; g <= np; g++) { grpOff[g] = o / 8; inst.set(grp[g].subarray(0, grpN[g] * 8), o); o += grpN[g] * 8; }
+  grpOff[0] = o / 8; inst.set(grp[0].subarray(0, grpN[0] * 8), o); o += grpN[0] * 8;
   shadowCount = o / 8;
   for (let k = 0; k < corpse.n; k++) { const x = corpse.x[k], y = corpse.y[k]; if (x < minX || x > maxX || y < minY || y > maxY) continue; inst[o++] = x; inst[o++] = y; inst[o++] = corpse.f[k]; inst[o++] = 0; inst[o++] = corpse.r[k]; inst[o++] = -1; inst[o++] = 0; inst[o++] = 1; }
   for (let a = 0; a < arrows.n; a++) {
@@ -534,7 +861,7 @@ function render(now) {
   gl.bindVertexArray(vaoG); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   buildInstances(now);
   gl.bindBuffer(gl.ARRAY_BUFFER, instBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, inst, 0, instCount * 8);
-  gl.bindVertexArray(vao);
+  gl.bindVertexArray(vao); instPtr(0);
   // sombras
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   gl.useProgram(PS); setCam(PS); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, shadowCount);
@@ -543,9 +870,20 @@ function render(now) {
   gl.useProgram(P); setCam(P);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texAtlas); gl.uniform1i(gl.getUniformLocation(P, 'uTex'), 0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texFrames); gl.uniform1i(gl.getUniformLocation(P, 'uFrames'), 1);
-  gl.uniform2f(gl.getUniformLocation(P, 'uAtlas'), atlasW, atlasH); gl.uniform1f(gl.getUniformLocation(P, 'uK'), K);
-  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
-  gl.bindVertexArray(null);
+  const uAtlas = gl.getUniformLocation(P, 'uAtlas'); gl.uniform1f(gl.getUniformLocation(P, 'uK'), K);
+  // um desenho por página de caminhada (a profundidade mantém a ordem certa entre os grupos)
+  gl.activeTexture(gl.TEXTURE0);
+  const np = WALK.ready ? WALK.pages.length : 0;
+  for (let g = 1; g <= np; g++) { if (!grpN[g]) continue;
+    gl.bindTexture(gl.TEXTURE_2D, WALK.tex[g - 1]); gl.uniform2f(uAtlas, WALK.pages[g - 1].w, WALK.pages[g - 1].h);
+    instPtr(grpOff[g]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, grpN[g]); }
+  gl.bindTexture(gl.TEXTURE_2D, texAtlas); gl.uniform2f(uAtlas, atlasW, atlasH);
+  instPtr(grpOff[0]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount - grpOff[0]);
+  instPtr(0); gl.bindVertexArray(null);
+}
+function instPtr(first) { // aponta os atributos por instância para começar na instância 'first'
+  gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+  gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 32, first * 32); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 32, first * 32 + 16);
 }
 // sobreposição 2D: bandeiras dos regimentos e seleção
 const KIND_ICON = { lanceiro: '🔱', piqueiro: '↟', espadachim: '⚔', escudeiro: '🛡', machadeiro: '🪓', arqueiro: '🏹', cavaleiro: '🐎' };
@@ -603,7 +941,7 @@ function fmtTime(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60
 function hud() {
   syncCards();
   let b = 0, r = 0; for (let i = 0; i < N; i++) if (S.alive[i]) S.team[i] ? r++ : b++;
-  document.getElementById('hud').innerHTML = `<b>${stat.fps.toFixed(0)}</b> FPS · lógica ${stat.logic.toFixed(1)} ms${stride > 1 ? ' (÷' + stride + ')' : ''} · desenho ${stat.render.toFixed(1)} ms<br>⏱ ${fmtTime(battleTime)} · <span style="color:#9fd08f">Cervo ${b.toLocaleString('pt-BR')}</span> × <span style="color:#c9a6e6">Corvo ${r.toLocaleString('pt-BR')}</span> · regimentos ${regs.filter(x => x.alive).length}`;
+  document.getElementById('hud').innerHTML = `<b>${stat.fps.toFixed(0)}</b> FPS · lógica ${stat.logic.toFixed(1)} ms${stride > 1 ? ' (÷' + stride + ')' : ''} · desenho ${stat.render.toFixed(1)} ms<br>⏱ ${fmtTime(battleTime)} · <span style="color:#9fd08f">Cervo ${b.toLocaleString('pt-BR')}</span> × <span style="color:#c9a6e6">Corvo ${r.toLocaleString('pt-BR')}</span> · regimentos ${regs.filter(x => x.alive).length}${WALK.ready ? '' : ' · preparando animações de marcha…'}`;
 }
 // ---------- toques ----------
 // 1 dedo: arrasta o mapa · toque: seleciona/ordena · SEGURAR e arrastar (com tropas selecionadas): desenha a formação · pinça: zoom
@@ -684,12 +1022,19 @@ function syncCards() {
 function nameOf(k) { return { lanceiro: 'lanceiros', piqueiro: 'piqueiros', espadachim: 'espadachins', escudeiro: 'escudeiros', machadeiro: 'machadeiros', arqueiro: 'arqueiros', cavaleiro: 'cavaleiros' }[k] || k; }
 let toastT = 0; function toast(t) { const el = document.getElementById('toast'); el.textContent = t; el.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('show'), 2200); }
 // ---------- início ----------
-window.__G = { dirOf: a => dirOf(screenDir(a)), auto: () => document.getElementById('advance').click(), selected, planFormation, applyPlan, toWorld: (x, y) => toWorld(x, y), get battleTime() { return battleTime }, S, step, toScreen: (x, y) => toScreen(x, y), setStride: v => { stride = v; }, regs: () => regs, get paused() { return paused }, set paused(v) { paused = v }, get N() { return N }, cam, makeBattle, stat, setIso: v => { isoMode = v; }, setQuality: q => { quality = q; resize(); } };
+window.__G = { dirOf: a => dirOf(screenDir(a)), auto: () => document.getElementById('advance').click(), selected, planFormation, applyPlan, toWorld: (x, y) => toWorld(x, y), get battleTime() { return battleTime }, S, step, toScreen: (x, y) => toScreen(x, y), setStride: v => { stride = v; }, regs: () => regs, get paused() { return paused }, set paused(v) { paused = v }, get N() { return N }, cam, makeBattle, stat, setIso: v => { isoMode = v; }, setQuality: q => { quality = q; resize(); },
+  walk: WALK, walkFrameIndex,
+  // importa spritesheet(s) de caminhada desenhados à mão e regera as páginas (veja docs/ANIMACAO_CAMINHADA.md)
+  importWalkSheet: e => { WALK.imports.push(...(Array.isArray(e) ? e : [e])); return startWalkBake(WALK.src[0], WALK.src[1]); },
+  // exporta uma página gerada como PNG (para usar de base ao desenhar quadros melhores)
+  walkSheetURL: (page = 0) => loadWalkImports(WALK.imports).then(im => { const it = bakeWalk(WALK.src[0], WALK.src[1], gl.getParameter(gl.MAX_TEXTURE_SIZE), im); let r; while (!(r = it.next()).done); const p = r.value.pages[page]; const c = document.createElement('canvas'); c.width = p.w; c.height = p.h; c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(p.buf.buffer), p.w, p.h), 0, 0); return c.toDataURL('image/png'); }) };
 function start(atlasImg, groundImg, meta) {
   if (!gl) { document.body.innerHTML = '<p style="color:#fff;padding:20px">Seu navegador não suporta WebGL2.</p>'; return; }
   resize(); addEventListener('resize', resize);
   initGL(atlasImg, groundImg, meta);
   makeBattle(5000);
+  if (Array.isArray(window.SDG_WALK_SHEETS)) WALK.imports.push(...window.SDG_WALK_SHEETS);
+  WALK.src = [atlasImg, meta]; startWalkBake(atlasImg, meta);
   document.querySelectorAll('[data-n]').forEach(b => b.onclick = () => { makeBattle(+b.dataset.n); toast('Nova batalha: ' + (+b.dataset.n).toLocaleString('pt-BR') + ' soldados'); });
   document.getElementById('iso').onclick = () => { isoMode = !isoMode; document.getElementById('iso').textContent = isoMode ? '👁 Vista de cima' : '👁 Vista de lado'; };
   document.getElementById('speed').onclick = () => { const v = [.5, 1, 2, 4]; timeScale = v[(v.indexOf(timeScale) + 1) % v.length]; document.getElementById('speed').textContent = '⏩ ' + (timeScale === .5 ? '½' : timeScale) + '×'; };
