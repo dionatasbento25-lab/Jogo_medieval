@@ -11,7 +11,7 @@ const DEF={
  quarry:{cost:[50,60,0],unlock:2,job:'stone',rate:.28,role:2,desc:'Extrai pedra. Rende mais perto das montanhas.'},
  warehouse:{cost:[60,90,20],unlock:2,desc:'Aumenta a capacidade de armazenar recursos.'},
  market:{cost:[120,90,40],unlock:2,job:'gold',rate:.3,role:0,shirt:'#8a5bc2',desc:'Comércio: gera ouro e alegra o povo.'},
- tower:{cost:[90,60,110],unlock:2,desc:'Expande as fronteiras do reino.'},
+ tower:{cost:[90,60,110],unlock:2,desc:'Vigia as fronteiras: o povo se sente seguro e fica mais feliz.'},
  mine:{cost:[100,80,60],unlock:3,job:'gold',rate:.26,role:2,desc:'Extrai ouro. Só funciona perto de montanhas.'},
  tavern:{cost:[160,120,80],unlock:3,job:'happy',rate:0,role:0,shirt:'#f6efe0',desc:'Cerveja e música: muita felicidade para o reino.'},
 };
@@ -21,7 +21,7 @@ const IDLE_SHIRTS=['#4a78c4','#d9a32a','#3fa7a0','#b8577a','#7a8f3f','#9a6cc8','
 const BUILD_ORDER=['house','farm','lumber','well','quarry','warehouse','market','tower','mine','tavern'];
 const HEIGHT={castle:20,house:8,farm:7,lumber:5,quarry:5,mine:5,market:4,tavern:8,warehouse:6,tower:12,well:3};
 const GOALS=[
- {t:'Funde o castelo do seu reino',f:()=>S.castle?1:0,n:1,r:[0,100,0]},
+ {t:'Escolha o seu reino e erga o castelo',f:()=>castleL()?1:0,n:1,r:[0,100,0]},
  {t:'Construa 2 casas',f:()=>countB('house'),n:2,r:[60,0,0]},
  {t:'Construa uma fazenda',f:()=>countB('farm'),n:1,r:[0,50,0]},
  {t:'Construa um lenhador',f:()=>countB('lumber'),n:1,r:[50,0,0]},
@@ -39,8 +39,9 @@ const GOALS=[
  {t:'Alcance 60 habitantes',f:()=>S.pop,n:60,r:[800,0,0]},
  {t:'Evolua o castelo ao nível 5',f:()=>castleL()>=5?1:0,n:1,r:[2000,2000,2000]},
 ];
-const SAVE_KEY='reinos_city_v1';
-let S={res:{gold:250,wood:250,stone:150,food:80},b:[],pop:0,goal:0,castle:0,nextId:1,saved:0,growT:0};
+const SAVE_KEY='reinos_city_v2';
+let S={res:{gold:250,wood:250,stone:150,food:80},b:[],pop:0,goal:0,castle:0,nextId:1,saved:0,growT:0,kingdom:-1};
+function playerKingdom(){return S.kingdom}
 const econ={rate:{gold:0,wood:0,stone:0,food:0},cap:600,popCap:0,hap:60,jobs:0,builders:2};
 const byId=new Map(),occ=new Map();
 const tkey=(i,j)=>(i+600)*2000+(j+600);
@@ -56,8 +57,9 @@ function workTime(type,level){return TYPES[type].time*(1+.6*(level-1))}
 function slotsOf(b){const d=DEF[b.type];if(!d.job||b.state!=='done')return 0;if(b.type==='tavern')return 1+Math.floor(b.level/2);return 1+b.level}
 
 /* ---------- Território ---------- */
-function terrCircles(){const out=[];for(const b of S.b){if(b.state!=='done'&&!(b.type==='castle'))continue;if(b.type==='castle')out.push([b.x,b.z,55+12*((b.state==='done'?b.level:1)-1)]);else if(b.type==='tower')out.push([b.x,b.z,34+6*(b.level-1)])}return out}
-function inTerr(x,z,circ){for(const c of circ)if(Math.hypot(x-c[0],z-c[1])<=c[2])return true;return false}
+/* ---------- Território: as províncias do seu reino ---------- */
+function ownerAt(x,z){const p=provAt(x,z);return p<0?-1:FEUDAL.prov[p][2]}
+function inTerr(x,z,k){return k>=0&&ownerAt(x,z)===k}
 
 /* ---------- Avaliação do terreno para cada construção ---------- */
 function fracAround(x,z,r,set){let n=0,k=0;for(let dz=-r;dz<=r;dz+=6)for(let dx=-r;dx<=r;dx+=6){if(dx*dx+dz*dz>r*r)continue;k++;if(set.includes(classAt(x+dx,z+dz)))n++}return n/Math.max(1,k)}
@@ -68,18 +70,18 @@ function efficiency(type,x,z){
  if(type==='mine'){const f=fracAround(x,z,40,[5,6]);return {e:clamp(.45+f*2.2,.45,1.7),need:f>.07,why:'A mina precisa ficar ao pé de uma montanha'}}
  return {e:1,need:true}}
 function snapPos(type,px,pz){const n=TYPES[type].size;const i0=Math.round(px/TILE-n/2),j0=Math.round(pz/TILE-n/2);return {i0,j0,x:(i0+n/2)*TILE,z:(j0+n/2)*TILE}}
-function check(type,px,pz,ignoreId){
+function check(type,px,pz,ignoreId,owner){const K=owner==null?S.kingdom:owner;
  const n=TYPES[type].size,sp=snapPos(type,px,pz),{i0,j0,x,z}=sp,S2=n*TILE/2;
  const res={ok:false,x,z,i0,j0,why:'',e:1,y:0,minH:0};
  if(Math.abs(x)>HX-40||Math.abs(z)>HZ-40){res.why='Longe demais';return res}
- if(type==='castle'&&S.castle&&ignoreId!==S.castle){res.why='O reino já tem um castelo';return res}
+ if(type==='castle'&&owner==null&&S.castle&&ignoreId!==S.castle){res.why='O reino já tem um castelo';return res}
  for(let j=j0;j<j0+n;j++)for(let i=i0;i<i0+n;i++){const o=occ.get(tkey(i,j));if(o&&o!==ignoreId){res.why='Espaço ocupado';return res}}
  let mn=1e9,mx=-1e9;const st=Math.min(4,S2);
  for(let dz=-S2;dz<=S2+.01;dz+=st)for(let dx=-S2;dx<=S2+.01;dx+=st){const xx=x+dx,zz=z+dz;if(isWater(xx,zz)){res.why='Não dá para construir na água';return res}
   const c=classAt(xx,zz);if(c===6||(c===5&&type!=='mine'&&type!=='tower')){res.why='Terreno montanhoso demais';return res}
   const h=meshH(xx,zz);mn=Math.min(mn,h);mx=Math.max(mx,h)}
  if(mx-mn>1.4+n*.4){res.why='Terreno inclinado demais';return res}
- if(type!=='castle'){const circ=terrCircles();for(const [dx,dz] of [[-1,-1],[1,-1],[1,1],[-1,1]])if(!inTerr(x+dx*S2,z+dz*S2,circ)){res.why='Fora das fronteiras do reino';return res}}
+ for(const [dx,dz] of [[-1,-1],[1,-1],[1,1],[-1,1],[0,0]])if(!inTerr(x+dx*S2,z+dz*S2,K)){res.why=K<0?'Escolha um reino primeiro':'Fora das províncias do seu reino';return res}
  const ef=efficiency(type,x,z);res.e=ef.e;if(!ef.need){res.why=ef.why;return res}
  res.ok=true;res.y=mx+.15;res.minH=mn;return res}
 
@@ -111,7 +113,7 @@ function computeEcon(){
  const cl=castleL();let cap=600+400*Math.max(0,cl-1),popCap=0,hap=55;
  for(const b of S.b){if(b.state!=='done')continue;const L=b.level;
   if(b.type==='castle')popCap+=6;if(b.type==='house')popCap+=4+2*(L-1);if(b.type==='warehouse')cap+=500*L;
-  if(b.type==='well')hap+=3+2*L;if(b.type==='market')hap+=2*L;if(b.type==='tavern')hap+=8+5*L;if(b.type==='house'&&L>=4)hap+=1}
+  if(b.type==='well')hap+=3+2*L;if(b.type==='market')hap+=2*L;if(b.type==='tavern')hap+=8+5*L;if(b.type==='tower')hap+=2+2*L;if(b.type==='house'&&L>=4)hap+=1}
  if(S.res.food<=0)hap-=35;if(S.pop>popCap)hap-=10;
  econ.hap=clamp(hap,0,100);econ.cap=cap;econ.popCap=popCap;econ.builders=1+Math.max(1,cl);
  // distribuição de trabalho: um aldeão por vez em cada posto (rodízio), comida primeiro se faltar
@@ -264,6 +266,27 @@ const sparks=[],confs=[];
 function spark(x,z){if(sparks.length>60)return;sparks.push({x,y:ground(x,z)+.9,z,vx:(Math.random()-.5)*2,vy:2+Math.random()*2,vz:(Math.random()-.5)*2,t:.5})}
 function confetti(b){if(!isNear(b.x,b.z,300))return;for(let k=0;k<40;k++)confs.push({x:b.x,y:b.y+(HEIGHT[b.type]||6)*.8,z:b.z,vx:(Math.random()-.5)*9,vy:4+Math.random()*6,vz:(Math.random()-.5)*9,t:1.6+Math.random(),r:Math.random()*6,c:k%5})}
 const staticOut=new Out(1<<15),animOut=new Out(1<<14),ghostOut=new Out(1<<13);
+const worldOut=new Out(1<<16),strOut=new Out(1<<10);
+/* ---------- Estreitos: linha pontilhada sobre a água (do mapa original) ---------- */
+function buildStraits(){const FW=FEUDAL.frame[0],FH=FEUDAL.frame[1],cream=[.97,.91,.74],dark=[.24,.17,.09];
+ const g=makeGeo(()=>{for(const sg of FEUDAL.straits){let ax=sg[0]/FW*WX-HX,az=sg[1]/FH*WZ-HZ,bx=sg[2]/FW*WX-HX,bz=sg[3]/FH*WZ-HZ;
+  let dx=bx-ax,dz=bz-az,L=Math.hypot(dx,dz)||1;const ux=dx/L,uz=dz/L,ext=Math.max(4,(12-L)/2+3);ax-=ux*ext;az-=uz*ext;bx+=ux*ext;bz+=uz*ext;L+=2*ext;
+  const px=-uz,pz=ux,DASH=2.6,GAP=1.8;
+  for(let t=0;t<L;t+=DASH+GAP){const t1=Math.min(t+DASH,L),x0=ax+ux*t,z0=az+uz*t,x1=ax+ux*t1,z1=az+uz*t1;
+   const y0=Math.max(meshH(x0,z0),0)+.5,y1=Math.max(meshH(x1,z1),0)+.5;
+   for(const [w,c,dy] of [[1.9,dark,0],[1.05,cream,.06]])quad([x0-px*w,y0+dy,z0-pz*w],[x0+px*w,y0+dy,z0+pz*w],[x1+px*w,y1+dy,z1+pz*w],[x1-px*w,y1+dy,z1-pz*w],c)}}});
+ strOut.reset();strOut.stamp(g,0,0,0);strOut.upload();meshVer++}
+/* ---------- Castelos dos outros 60 reinos, na capital de cada um ---------- */
+const worldCastles=[];
+function findSpot(type,x0,z0,owner,maxR=90){for(let r=0;r<=maxR;r+=4){const n=r?Math.max(8,Math.round(r*1.2)):1;for(let k=0;k<n;k++){const a=k/n*Math.PI*2;const c=check(type,x0+Math.cos(a)*r,z0+Math.sin(a)*r,0,owner);if(c.ok)return c}}return null}
+function castleSpotFor(h){const fh=FEUDAL.houses[h],seat=anchorOf(fh.seat);let c=findSpot('castle',seat.x,seat.z,h,140);if(c)return c;
+ for(let i=0;i<NP&&!c;i++)if(FEUDAL.prov[i][2]===h){const a=anchorOf(i);c=findSpot('castle',a.x,a.z,h,100)}return c}
+function buildWorldCastles(){for(const w of worldCastles)if(w.tiles)for(const t of w.tiles)occ.delete(t);worldCastles.length=0;worldOut.reset();
+ FEUDAL.houses.forEach((h,i)=>{if(i===S.kingdom)return;const c=castleSpotFor(i);if(!c)return;
+  const L=clamp(1+Math.floor(h.n/4),1,4),n=TYPES.castle.size,b={type:'castle',x:c.x,z:c.z,y:c.y,minH:c.minH,rot:(i*7)%4,level:L,house:i,tiles:[]};
+  for(let j=c.j0;j<c.j0+n;j++)for(let q=c.i0;q<c.i0+n;q++){const t=tkey(q,j);occ.set(t,-1-i);b.tiles.push(t)}
+  stampFoundation(worldOut,b);stampBuilding(worldOut,b,getModel('castle',L));worldCastles.push(b)});
+ worldOut.upload();tileCache.clear();treeKey='';shadowDirty=true;meshVer++}
 let staticDirty=true,terrDirty=true;
 function stampBuilding(out,b,model,sy=1,sxz=1,tint=1){const a=b.rot*Math.PI/2;out.stamp(model,b.x,b.y,b.z,a,sxz,sy,sxz,tint)}
 function stampFoundation(out,b){const n=TYPES[b.type].size*TILE,dep=b.y-b.minH+.6;out.stamp(cached(foundGeo,n,()=>box(0,0,0,n-.3,1,n-.3,'#8a9a5a')),b.x,b.y-dep-.05,b.z,0,1,dep,1)}

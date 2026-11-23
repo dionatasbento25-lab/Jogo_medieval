@@ -63,3 +63,14 @@ body.compact #goal{top:44px;bottom:auto;width:200px;padding:6px 9px}body.compact
 body.compact #buildMenu{bottom:52px;padding:6px}body.compact .card{width:76px;padding:4px}body.compact .card .ic{font-size:20px}
 body.compact #info{top:44px;bottom:auto;right:50px;left:auto;transform:none;max-height:calc(100% - 100px);overflow:auto;padding:10px}
 body.compact #confirm{bottom:52px}body.compact #ghostInfo{bottom:100px}body.compact #toasts{top:44px}body.compact #btnReset{display:none}
+/* --- integração com o mapa dos 61 reinos --- */
+#top{align-items:center}#clock{flex:none}
+.panel{left:auto;right:12px;top:66px;width:min(300px,calc(100vw - 24px))}.panel button.gold{color:#3a2408}
+#msg{display:none}
+#mapMenu{position:absolute;bottom:84px;left:50%;transform:translateX(-50%);display:none;gap:6px;padding:8px;border-radius:16px;background:#1d2c27f2;border:1px solid #b8a56c80;box-shadow:0 8px 30px #000a;z-index:6}
+#mapMenu.show{display:flex}#mapMenu button{min-width:76px;padding:7px 6px;border-radius:11px;border:1px solid transparent;background:#2a3a33;color:#efdfb9;font-size:11px;line-height:1.5}#mapMenu button.active{border-color:#d4b765;background:#ad8b3850}
+#pausedTag{z-index:4}
+@media(max-width:900px){.brandbox{display:none}}
+@media(max-width:760px){#clock{padding:3px 6px 3px 3px;gap:5px}#playBtn{width:28px;height:28px}#dateTxt{font-size:10.5px}#dateBox{min-width:96px}.panel{top:auto;bottom:84px;right:50%;transform:translateX(50%)}}
+body.compact #clock{padding:2px 6px 2px 2px}body.compact .panel{top:44px;right:50px;max-height:calc(100% - 100px);overflow:auto}body.compact #mapMenu{bottom:52px}body.compact .chip em{display:none}
+body.compact #top{gap:6px}

@@ -1,7 +1,9 @@
 <div id="app"><canvas id="scene"></canvas>
+<div id="labels"></div><div id="pin"></div>
 <div id="overlay"></div>
 <div id="top">
- <div class="brandbox"><div class="brand">⚜ REINOS 3D</div><div class="sub">CONSTRUA SEU REINO</div></div>
+ <div class="brandbox"><div class="brand">⚜ REINOS 3D</div><div class="sub">61 REINOS INDEPENDENTES</div></div>
+ <div id="clock"><button id="playBtn" title="Pausar / continuar (barra de espaço)">⏸</button><div id="dateBox"><div id="dateTxt">1º de Janeiro, 1000</div><div id="speeds"><i data-s="1"></i><i data-s="2"></i><i data-s="3"></i><i data-s="4"></i><i data-s="5"></i></div></div></div>
  <div class="res">
   <div class="chip" title="Ouro"><span class="i">🪙</span><div><b id="r_gold">0</b><span class="rate" id="rr_gold"></span></div><em><i id="rb_gold"></i></em></div>
   <div class="chip" title="Madeira"><span class="i">🌲</span><div><b id="r_wood">0</b><span class="rate" id="rr_wood"></span></div><em><i id="rb_wood"></i></em></div>
@@ -12,15 +14,19 @@
  </div>
 </div>
 <div id="goal" title="Toque para recolher"><div class="gt">📜 OBJETIVO <span id="goalProg"></span></div><div id="goalTxt"></div><div class="gbar"><i id="goalBar"></i></div><div class="small" id="goalRew"></div></div>
-<div id="toasts"></div>
+<div class="panel" id="panel"><h3 id="panelTitle">Província</h3><p id="panelText"></p><button onclick="closePanel()">Fechar</button></div>
+<div id="sheet"><button id="sheetClose" title="Fechar">✕</button><div id="sheetBody"></div></div>
+<div id="pausedTag">Pausado</div>
+<div id="msg"></div><div id="toasts"></div>
 <div id="ghostInfo"></div>
-<div class="tip" id="tip">☝ Toque numa construção para ver detalhes e melhorar</div>
+<div class="tip" id="tip">👑 Toque numa província para ver qual reino a governa</div>
 <div id="info"><button id="btnClose" class="x">✕</button><h3 id="infoTitle"></h3><div id="infoBody"></div><div class="acts"><button id="btnUp" class="gold">⬆ Melhorar</button><button id="btnDemo" class="red">🗑 Demolir</button></div></div>
 <div id="buildMenu"></div>
+<div id="mapMenu"><button data-map="terrain">🗺<br>Terreno</button><button data-map="provinces">🧩<br>Províncias</button><button data-map="houses" class="active">👑<br>Reinos</button><button data-map="regions">🧭<br>Regiões</button></div>
 <div id="confirm"><button id="cRot">⟲ Girar</button><button id="cOk" class="gold">✔ Construir</button><button id="cNo" class="red">✕</button></div>
-<div class="controls"><button class="round" id="plus" title="Aproximar">+</button><button class="round" id="minus" title="Afastar">−</button><button class="round" id="reset" title="Voltar ao castelo">⌂</button><button class="round" id="orient" title="Horizontal / vertical">⟳</button></div>
-<div class="toolbar"><button class="tool active" data-mode="select" id="btnSelect"><b>☝</b>Explorar</button><button class="tool" data-mode="build" id="btnBuild"><b>🔨</b>Construir</button><button class="tool" data-mode="demolish" id="btnDemolish"><b>🗑</b>Demolir</button></div>
-<div class="modal" id="intro"><div class="card2"><div class="big">🏰</div><h2>Funde o seu reino</h2><p>Escolha um lugar no continente para erguer o castelo. Planícies são ótimas para fazendas; florestas dão madeira e montanhas dão pedra e ouro.</p><p class="small">Arraste para mover • pinça ou roda do mouse para aproximar • botão direito (ou 2 dedos) para girar</p><button id="introGo" class="gold">Escolher o local</button></div></div>
+<div class="controls"><button class="round" id="plus" title="Aproximar">+</button><button class="round" id="minus" title="Afastar">−</button><button class="round" id="chron" title="Crônica dos reinos">📜</button><button class="round" id="reset" title="Voltar ao castelo">⌂</button><button class="round" id="orient" title="Horizontal / vertical">⟳</button><button class="round" id="full" title="Tela cheia">⛶</button></div>
+<div class="toolbar"><button class="tool active" data-mode="select" id="btnSelect"><b>☝</b>Explorar</button><button class="tool" data-mode="build" id="btnBuild"><b>🔨</b>Construir</button><button class="tool" data-mode="demolish" id="btnDemolish"><b>🗑</b>Demolir</button><button class="tool" id="btnMap"><b>🗺</b>Mapa</button></div>
+<div class="modal" id="intro"><div class="card2"><div class="big">👑</div><h2>Escolha o seu reino</h2><p>O continente está dividido em <b>61 reinos independentes</b>, cada um com suas províncias, sua capital e sua dinastia.</p><p>Toque numa província e em <b>“Governar este reino”</b>. Seu castelo será erguido na capital, e você poderá construir em todas as províncias do seu reino.</p><p class="small">Arraste para mover • pinça ou roda do mouse para aproximar • botão direito (ou 2 dedos) para girar</p><button id="introGo" class="gold">Escolher no mapa</button></div></div>
 <div class="modal" id="back"><div class="card2"><div class="big">👑</div><h2>Bem-vindo de volta!</h2><p id="backTxt"></p><button id="backOk" class="gold">Coletar</button></div></div>
 <button id="btnReset" title="Recomeçar">↺</button>
 <div id="loading"><b>⚜ REINOS 3D</b><span id="loadTxt">Carregando o continente…</span></div></div>
