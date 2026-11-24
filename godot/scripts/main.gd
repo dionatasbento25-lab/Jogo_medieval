@@ -65,6 +65,7 @@ func _ready() -> void:
 	ready_done = true
 	ui.hide_loading()
 	if "--autotest" in OS.get_cmdline_user_args(): _autotest()
+	if "--castles" in OS.get_cmdline_user_args(): _castle_gallery()
 
 func _setup_env() -> void:
 	var we = WorldEnvironment.new(); env = Environment.new()
@@ -299,12 +300,13 @@ func _sync_buildings() -> void:
 		var ent = {node = n, key = key, model = null, scaf = null, fx = {flags = [], smoke = [], mill = [], crane = []}}
 		if b.state == "site":
 			_make_mi(M.plot(b.type), root); _make_mi(M.site(b.type), n)
-			ent.model = _make_mi(M.model(b.type, 1), root); ent.scaf = _make_mi(M.scaffold(b.type), n)
+			ent.model = _make_mi(_bmodel(b.type, 1), root); ent.scaf = _make_mi(M.scaffold(b.type), n)
 		else:
-			ent.model = _make_mi(M.model(b.type, b.level), root)
+			ent.model = _make_mi(_bmodel(b.type, b.level), root)
 			if b.upg: ent.scaf = _make_mi(M.scaffold(b.type, true), n)
-			var fx = M.fx_of(b.type, b.level)
-			for p in fx.flags: var mi = _make_mi(M.flag(), root); mi.position = p - Vector3(0, 0.75, 0); ent.fx.flags.append(mi)
+			var fx = Cs.fx(Game.S.kingdom, b.level) if b.type == "castle" else M.fx_of(b.type, b.level)
+			var fc = Cs.banner_color(Game.S.kingdom) if b.type == "castle" else Color("#2f5fb8")
+			for p in fx.flags: var mi = _make_mi(M.flag(fc), root); mi.position = p - Vector3(0, 0.75, 0); ent.fx.flags.append(mi)
 			for p in fx.mill: var mi = _make_mi(M.blade(), root); mi.position = p; ent.fx.mill.append(mi)
 			for p in fx.crane: var mi = _make_mi(M.crane_arm(), root); mi.position = p; ent.fx.crane.append(mi)
 			for p in fx.smoke:
@@ -318,7 +320,24 @@ func _sync_buildings() -> void:
 		world_nodes.clear()
 		for w in Game.world_castles:
 			var n = Node3D.new(); n.position = Vector3(w.x, w.y, w.z); n.set_meta("k", Game.S.kingdom); add_child(n)
-			_foundation(w, n); var mi = _make_mi(M.model("castle", w.level), n); mi.rotation.y = w.rot * PI / 2; world_nodes.append(n)
+			_foundation(w, n); var far = _make_mi(Cs.far_model(w.house, w.level), n); far.rotation.y = w.rot * PI / 2
+			n.set_meta("far", far); n.set_meta("w", w); world_nodes.append(n)
+## Castelos dos outros reinos: de longe um modelo simples; o detalhado é montado aos poucos quando a câmera chega perto.
+const DETAIL_RANGE := 520.0
+func _detail_world_castles() -> void:
+	if dist > 800: return
+	var best = null; var bd = 1e9
+	for n in world_nodes:
+		if n.has_meta("detail"): continue
+		var d = Vector2(n.position.x - target.x, n.position.z - target.z).length()
+		if d < 700 and d < bd: bd = d; best = n
+	if best == null: return
+	var w = best.get_meta("w"); var mi = _make_mi(Cs.model(w.house, w.level), best); mi.rotation.y = w.rot * PI / 2
+	mi.visibility_range_end = DETAIL_RANGE; mi.visibility_range_end_margin = 30
+	var far: MeshInstance3D = best.get_meta("far"); far.visibility_range_begin = DETAIL_RANGE; far.visibility_range_begin_margin = 30
+	best.set_meta("detail", mi)
+func _bmodel(t: String, L: int) -> ArrayMesh:
+	return Cs.model(Game.S.kingdom, L) if t == "castle" else M.model(t, L)
 func _animate_buildings(t: float) -> void:
 	for b in Game.S.b:
 		var e = bnodes.get(b.id)
@@ -488,6 +507,7 @@ func _process(delta: float) -> void:
 	Game.cam_state = [target.x, target.z, dist, yaw, pitch]
 	if _bdirty: _sync_buildings()
 	_animate_buildings(anim_t)
+	_detail_world_castles()
 	_update_trees()
 	_upload_villagers(); _step_particles(dt)
 	var M_: Dictionary = MODES[map_mode]
@@ -561,3 +581,27 @@ func _autotest() -> void:
 func _shot(path: String) -> void:
 	await RenderingServer.frame_post_draw
 	get_viewport().get_texture().get_image().save_png(path); print("shot ", path)
+
+## Vitrine dos castelos (godot -- --castles --out=pasta): vários reinos lado a lado, sobre o mar
+func _castle_gallery() -> void:
+	var out := "user://"
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--out="): out = a.substr(6)
+	ui.modal.visible = false
+	var t0 = Time.get_ticks_msec(); var verts = 0
+	var ks = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+	for i in ks.size():
+		var n = Node3D.new(); n.position = Vector3(1700 + (i % 4) * 32, 0.3, -40 + int(i / 4) * 32); add_child(n)
+		var L = 1 + i % 5
+		var m = Cs.model(ks[i], L); verts += m.surface_get_array_len(0); _make_mi(m, n)
+		for p in Cs.fx(ks[i], L).flags:
+			var f = _make_mi(M.flag(Cs.banner_color(ks[i])), n); f.position = p - Vector3(0, 0.75, 0); f.rotation.y = 0.6
+	print("castelos: %d ms, %d vértices no total" % [Time.get_ticks_msec() - t0, verts])
+	print("far verts ", Cs.far_model(0, 3).surface_get_array_len(0))
+	fly = null; yaw = 0.35; pitch = 0.62
+	target = Vector3(1748, 0, -8); dist = 95
+	await get_tree().create_timer(1.0).timeout; await _shot(out + "/c_all.png")
+	for i in 4:
+		target = Vector3(1700 + (i % 4) * 32, 2, -40 + int(i / 4) * 32); dist = 34; yaw = 0.5 + i * 0.4; pitch = 0.6
+		await get_tree().create_timer(0.6).timeout; await _shot(out + "/c_%d.png" % i)
+	get_tree().quit()

@@ -422,7 +422,7 @@ func blade() -> ArrayMesh:
 			var P := func(r, w): return Vector3(c * r - s * w, s * r + c * w, 0)
 			quad(P.call(0.3, -0.12), P.call(3.2, -0.12), P.call(3.2, 0.12), P.call(0.3, 0.12), col("#6b5137"))
 			quad(P.call(0.9, 0.12), P.call(3.1, 0.12), P.call(3.1, 0.85), P.call(0.9, 0.85), col("#f6efe0" if k % 2 else "#e6dcc4")))
-func flag() -> ArrayMesh: return cached("flag", func(): box(0.65, 0, 0, 1.3, 0.75, 0.05, "#2f5fb8"); box(0.7, 0.22, 0.03, 0.36, 0.32, 0.03, "#ffd34d"))
+func flag(c := Color("#2f5fb8")) -> ArrayMesh: return cached("flag" + c.to_html(false), func(): box(0.65, 0, 0, 1.3, 0.75, 0.05, c); box(0.7, 0.22, 0.03, 0.36, 0.32, 0.03, "#ffd34d"))
 func puff() -> ArrayMesh: return cached("puff", func(): ball(0, 0, 0, 0.5, "#f4f1ea", 1, 3, 6, false))
 func crane_arm() -> ArrayMesh: return cached("crane", func(): box(1.4, 0, 0, 3.6, 0.22, 0.22, "#7a5232"); box(3, -0.9, 0, 0.05, 1.0, 0.05, "#3a2a1c"); bbox(3, -1.4, 0, 0.55, 0.5, 0.55, "#b9b6ad", 0.06))
 func spark() -> ArrayMesh: return cached("spark", func(): box(0, 0, 0, 0.18, 0.18, 0.18, "#ffd34d"))

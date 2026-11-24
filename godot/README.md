@@ -23,6 +23,7 @@ Tudo o que existe na versão web está aqui:
 ## Estrutura
 - `scripts/world.gd` — dados do mapa (relevo, biomas, províncias, rios, reinos) e consultas.
 - `scripts/models.gd` — modelos 3D low-poly de todas as construções, árvores e do aldeão articulado.
+- `scripts/castles.gd` — gerador de castelos em estilo de livro de histórias: um castelo único por reino (semente do reino), com versão simplificada para ver de longe.
 - `scripts/game.gd` — regras: economia, construção, população, empregos, rotina dos aldeões, salvar/carregar.
 - `scripts/dyn.gd` — calendário e dinastias dos 61 reinos.
 - `scripts/main.gd` — cena 3D: terreno em blocos, água, árvores e aldeões instanciados, câmera e gestos.
@@ -33,3 +34,4 @@ Tudo o que existe na versão web está aqui:
 Se o mapa mudar, rode `python3 godot/tools/export_assets.py caminho/do/mapa.html` para atualizar `data/`.
 
 Teste automático (gera capturas de tela): `godot --path godot -- --autotest --out=/pasta/de/saida`
+Vitrine de castelos de 12 reinos: `godot --path godot -- --castles --out=/pasta/de/saida`
